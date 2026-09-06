@@ -1,11 +1,11 @@
 const http = require('http');
 const querystring = require('querystring');
 
-const HOST = 'localhost';
-const PORT = process.env.PORT || 5000;
+// const HOST = 'localhost';
+// const PORT = process.env.PORT || 5000;
 ////////////////////////////////////////
-//const HOST = 'mysql-2b05b86f-kasunmahee34-2ead.e.aivencloud.com';
-//const PORT = process.env.PORT || 5000;
+const HOST = process.env.HOST_URL;
+const PORT = process.env.PORT || 5000;
 //////////////////////////////////////
 function request(method, path, data = null) {
   return new Promise((resolve, reject) => {
