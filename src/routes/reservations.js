@@ -219,9 +219,14 @@ router.get('/', authenticateToken, requirePermission('reservations.view'), async
     }
 
     if (dateFrom && dateTo) {
+      const start = new Date(`${dateFrom}T00:00:00.000Z`);
+      const end = new Date(`${dateTo}T23:59:59.999Z`);
+
+      // Include reservations that overlap the selected date window, even when the user picks a single date.
+      // This is intentionally inclusive so a reservation starting or ending on the selected day still appears.
       whereClause.AND = [
-        { checkIn: { lt: new Date(dateTo) } },
-        { checkOut: { gt: new Date(dateFrom) } }
+        { checkIn: { lte: end } },
+        { checkOut: { gte: start } }
       ];
     }
 
@@ -1373,10 +1378,17 @@ async function getFolioBalance(reservationId) {
   reservation.guestCharges.forEach(charge => {
     // exclude room charges as those are accounted above
     if (charge.chargeType && charge.chargeType.name === 'Room Charge') return;
-    incidentalTotal += charge.amount;
-    charge.taxes.forEach(t => {
-      incidentalTotal += t.amount;
-    });
+    const taxes = charge.taxes || [];
+    const taxSum = taxes.reduce((s, t) => s + (t.amount || 0), 0);
+    const taxableSumAvailable = taxes.length > 0 && taxes.every(t => typeof t.taxableAmount === 'number');
+    const taxableSum = taxableSumAvailable ? taxes.reduce((s, t) => s + (t.taxableAmount || 0), 0) : null;
+    if (taxableSumAvailable && Math.abs((taxableSum + taxSum) - charge.amount) < 0.01) {
+      // charge.amount already contains taxes (gross). Use it as the line gross amount.
+      incidentalTotal += charge.amount;
+    } else {
+      // charge.amount is treated as net (tax-exclusive)
+      incidentalTotal += charge.amount + taxSum;
+    }
   });
   incidentalTotal = Math.round(incidentalTotal * 100) / 100;
 
@@ -1435,10 +1447,20 @@ router.get('/:id/invoice/pdf', async (req, res) => {
     let incidentalVAT = 0;
     let incidentalTDL = 0;
     let incidentalNBT = 0;
-    const activeCharges = reservation.guestCharges.filter(c => !c.isVoid);
+    const activeCharges = reservation.guestCharges.filter(c => !c.isVoid && c.chargeType?.name !== 'Room Charge');
     activeCharges.forEach(charge => {
-      incidentalBase += charge.amount;
-      charge.taxes.forEach(t => {
+      const taxes = charge.taxes || [];
+      const taxSum = taxes.reduce((s, t) => s + (t.amount || 0), 0);
+      const taxableSumAvailable = taxes.length > 0 && taxes.every(t => typeof t.taxableAmount === 'number');
+      const taxableSum = taxableSumAvailable ? taxes.reduce((s, t) => s + (t.taxableAmount || 0), 0) : null;
+      if (taxableSumAvailable && Math.abs((taxableSum + taxSum) - charge.amount) < 0.01) {
+        // amount already includes taxes (gross). Use taxableSum as base for reporting and keep taxes separate.
+        incidentalBase += taxableSum;
+      } else {
+        // amount is net (tax-exclusive)
+        incidentalBase += charge.amount;
+      }
+      taxes.forEach(t => {
         if (t.taxType === 'SC') incidentalSC += t.amount;
         if (t.taxType === 'VAT') incidentalVAT += t.amount;
         if (t.taxType === 'TDL') incidentalTDL += t.amount;
@@ -1507,10 +1529,19 @@ router.get('/:id/invoice/pdf', async (req, res) => {
               <thead><tr><th>Description</th><th style="text-align:right">Qty</th><th style="text-align:right">Unit</th><th style="text-align:right">Total</th></tr></thead>
               <tbody>
                 ${activeCharges.map(charge => {
-                  const tTotal = (charge.taxes || []).reduce((s, t) => s + (t.amount || 0), 0);
-                  const lineTotal = Math.round((charge.amount + tTotal) * 100) / 100;
+                  const taxes = charge.taxes || [];
+                  const taxSum = taxes.reduce((s, t) => s + (t.amount || 0), 0);
+                  const taxableSumAvailable = taxes.length > 0 && taxes.every(t => typeof t.taxableAmount === 'number');
+                  const taxableSum = taxableSumAvailable ? taxes.reduce((s, t) => s + (t.taxableAmount || 0), 0) : null;
+                  let lineTotal;
+                  if (taxableSumAvailable && Math.abs((taxableSum + taxSum) - charge.amount) < 0.01) {
+                    // charge.amount already gross
+                    lineTotal = Math.round(charge.amount * 100) / 100;
+                  } else {
+                    lineTotal = Math.round((charge.amount + taxSum) * 100) / 100;
+                  }
                   return `<tr><td>${charge.chargeType?.name || 'Charge'}${charge.description ? ' - ' + charge.description : ''}</td><td style="text-align:right">1</td><td style="text-align:right">${charge.amount.toLocaleString()}</td><td style="text-align:right">${lineTotal.toLocaleString()}</td></tr>`;
-                }).join('')}
+                }).join('') }
               </tbody>
             </table>
           ` : ''}
